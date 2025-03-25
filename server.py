@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 import mysql.connector
 import paho.mqtt.client as mqtt
+import time
 
 # Flask App
 app = Flask(__name__)
@@ -10,15 +11,28 @@ from flask_cors import CORS
 
 CORS(app)
 
-# MySQL Database Connection
-db = mysql.connector.connect(
-    host="192.185.48.158",  # Example: localhost
-    user="bisublar_bibic",
-    password="bisublar_bibic",
-    database="bisublar_bibic"
-)
+# Function to create a persistent MySQL connection
+def connect_to_database():
+    while True:
+        try:
+            db = mysql.connector.connect(
+                host="192.185.48.158",
+                user="bisublar_bibic",
+                password="bisublar_bibic",
+                database="bisublar_bibic",
+                connection_timeout=10  # Set timeout to prevent infinite waiting
+            )
+            print("✅ Connected to MySQL")
+            return db
+        except mysql.connector.Error as err:
+            print(f"🔴 MySQL Connection Error: {err}")
+            print("Retrying in 5 seconds...")
+            time.sleep(5)  # Wait before retrying
 
+# Establish connection
+db = connect_to_database()
 cursor = db.cursor()
+
 
 # MQTT Settings
 MQTT_BROKER = "broker.hivemq.com"  # Public broker (or your own)
