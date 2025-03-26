@@ -44,6 +44,7 @@ def on_connect(client, userdata, flags, rc):
     else:
         print(f"🔴 MQTT Connection Failed with Code {rc}")
 
+
 def on_message(client, userdata, msg):
     payload = msg.payload.decode().strip()
     print(f"📩 Received MQTT Data: {payload}")
