@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: flask-server
+    env: python
+    repo: https://github.com/YOUR_USERNAME/YOUR_REPO
+    branch: main
+    startCommand: waitress-serve --port=5000 server:app
+    envVars:
+      - key: MYSQL_HOST
+        value: "192.185.48.158"
+      - key: MYSQL_USER
+        value: "bisublar_bibic"
+      - key: MYSQL_PASSWORD
+        value: "bisublar_bibic"
+      - key: MYSQL_DATABASE
+        value: "bisublar_bibic"
