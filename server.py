@@ -18,12 +18,12 @@ DB_CONFIG = {
 }
 
 # MQTT Configuration
-MQTT_BROKER = "broker.hivemq.com"
+MQTT_BROKER = "test.mosquitto.org"
 MQTT_PORT = 1883
 MQTT_TOPIC_SENSOR = "iot/sensor"
 MQTT_TOPIC_COMMAND = "iot/control"
 
-# Function to create a database connection
+# Function to create a new database connection
 def connect_db():
     while True:
         try:
@@ -31,12 +31,8 @@ def connect_db():
             print("✅ Connected to MySQL")
             return db
         except mysql.connector.Error as err:
-            print(f"🔴 Database Connection Error: {err}")
-            print("Retrying in 5 seconds...")
+            print(f"🔴 Database Connection Error: {err}. Retrying in 5s...")
             time.sleep(5)
-
-# Establish Persistent Database Connection
-db = connect_db()
 
 # MQTT Client Setup
 mqtt_client = mqtt.Client()
@@ -55,25 +51,33 @@ def on_message(client, userdata, msg):
     try:
         air_temp, humidity, water_temp, water_level, ph, tds = map(float, payload.split(","))
 
-        # Ensure MySQL Connection is Alive
-        global db
-        if not db.is_connected():
-            db = connect_db()
-
+        # Create a new MySQL connection for every request
+        db = connect_db()
         cursor = db.cursor()
         query = "INSERT INTO sensor_data (air_temp, humidity, water_temp, water_level, ph, tds) VALUES (%s, %s, %s, %s, %s, %s)"
         cursor.execute(query, (air_temp, humidity, water_temp, water_level, ph, tds))
         db.commit()
         cursor.close()
+        db.close()  # Close the connection after inserting data
         print("✅ Data stored in database")
     except Exception as e:
         print(f"🔴 Error processing MQTT data: {e}")
 
-# MQTT Client Initialization
+# Function to connect to MQTT broker with auto-reconnect
+def connect_mqtt():
+    while True:
+        try:
+            mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
+            print("✅ Connected to MQTT Broker")
+            return
+        except Exception as e:
+            print(f"🔴 MQTT Connection Failed: {e}. Retrying in 5s...")
+            time.sleep(5)
+
 mqtt_client.on_connect = on_connect
 mqtt_client.on_message = on_message
-mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
-mqtt_client.loop_start()
+connect_mqtt()
+mqtt_client.loop_start()  # Starts MQTT loop in background
 
 # ------------------ API ENDPOINTS ------------------
 
@@ -81,10 +85,12 @@ mqtt_client.loop_start()
 @app.route('/get_sensor_data', methods=['GET'])
 def get_sensor_data():
     try:
+        db = connect_db()  # Create a new database connection
         cursor = db.cursor(dictionary=True)
         cursor.execute("SELECT * FROM sensor_data ORDER BY id DESC LIMIT 50")
         data = cursor.fetchall()
         cursor.close()
+        db.close()  # Close connection after use
         return jsonify(data)
     except Exception as e:
         return jsonify({"error": f"Failed to fetch data: {e}"}), 500
@@ -93,14 +99,29 @@ def get_sensor_data():
 @app.route('/send_command', methods=['POST'])
 def send_command():
     data = request.json
-    command = data.get("command", "OFF")  
+    command = data.get("command", "").lower()  # Convert to lowercase
 
-    if command in ["ON", "OFF"]:
+    valid_commands = ["relay1_on", "relay2_on"]
+    
+    if command in valid_commands:
         mqtt_client.publish(MQTT_TOPIC_COMMAND, command)
         print(f"📤 Sent MQTT Command: {command}")
         return jsonify({"message": f"Command '{command}' sent!"}), 200
     
     return jsonify({"error": "Invalid command"}), 400
+
+# 📌 Health Check API to Monitor Server Status
+@app.route('/health', methods=['GET'])
+def health_check():
+    try:
+        db = connect_db()
+        cursor = db.cursor()
+        cursor.execute("SELECT 1")  # Test MySQL connection
+        cursor.close()
+        db.close()
+        return jsonify({"status": "running", "database": "connected", "mqtt": "connected"}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "database": "failed", "mqtt": "connected", "error": str(e)}), 500
 
 # Start the Flask Web Server
 if __name__ == '__main__':
