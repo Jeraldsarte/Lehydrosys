@@ -1,107 +1,98 @@
 from flask import Flask, request, jsonify
 import mysql.connector
 import paho.mqtt.client as mqtt
+import os  # Load environment variables
 import time
-
-# Flask App
-app = Flask(__name__)
-
-# Enable CORS (for Android app requests)
 from flask_cors import CORS
 
+# Flask App Setup
+app = Flask(__name__)
 CORS(app)
 
-# Function to create a persistent MySQL connection
-def connect_to_database():
-    while True:
-        try:
-            db = mysql.connector.connect(
-                host="192.185.48.158",
-                user="bisublar_bibic",
-                password="bisublar_bibic",
-                database="bisublar_bibic",
-                connection_timeout=10  # Set timeout to prevent infinite waiting
-            )
-            print("✅ Connected to MySQL")
-            return db
-        except mysql.connector.Error as err:
-            print(f"🔴 MySQL Connection Error: {err}")
-            print("Retrying in 5 seconds...")
-            time.sleep(5)  # Wait before retrying
+# Load Database Configuration from Environment Variables
+DB_CONFIG = {
+    "host": os.getenv("MYSQL_HOST"),
+    "user": os.getenv("MYSQL_USER"),
+    "password": os.getenv("MYSQL_PASSWORD"),
+    "database": os.getenv("MYSQL_DATABASE"),
+}
 
-# Establish connection
-db = connect_to_database()
-cursor = db.cursor()
-
-
-# MQTT Settings
-MQTT_BROKER = "broker.hivemq.com"  # Public broker (or your own)
+# MQTT Configuration
+MQTT_BROKER = "broker.hivemq.com"  # Public MQTT broker
 MQTT_PORT = 1883
-MQTT_TOPIC = "iot/control"
+MQTT_TOPIC_SENSOR = "iot/sensor"
+MQTT_TOPIC_COMMAND = "iot/control"
 
+# Function to create a database connection
+def connect_db():
+    try:
+        return mysql.connector.connect(**DB_CONFIG)
+    except mysql.connector.Error as err:
+        print(f"🔴 Database Connection Error: {err}")
+        return None
+
+# MQTT Client Setup
 mqtt_client = mqtt.Client()
-mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
 
+def on_connect(client, userdata, flags, rc):
+    print("✅ Connected to MQTT Broker")
+    client.subscribe(MQTT_TOPIC_SENSOR)
+
+def on_message(client, userdata, msg):
+    payload = msg.payload.decode().strip()
+    print(f"📩 Received MQTT Data: {payload}")
+
+    try:
+        air_temp, humidity, water_temp, water_level, ph, tds = map(float, payload.split(","))
+        db = connect_db()
+        if db:
+            cursor = db.cursor()
+            query = "INSERT INTO sensor_data (air_temp, humidity, water_temp, water_level, ph, tds) VALUES (%s, %s, %s, %s, %s, %s)"
+            cursor.execute(query, (air_temp, humidity, water_temp, water_level, ph, tds))
+            db.commit()
+            cursor.close()
+            db.close()
+            print("✅ Data stored in database")
+    except Exception as e:
+        print(f"🔴 Error processing data: {e}")
+
+# MQTT Client Initialization
+mqtt_client.on_connect = on_connect
+mqtt_client.on_message = on_message
+mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
+mqtt_client.loop_start()
 
 # ------------------ API ENDPOINTS ------------------
 
-# 📌 1. Receive sensor data from ESP32
-@app.route('/send_data', methods=['POST'])
-def receive_sensor_data():
-    data = request.json
-    air_temp = data.get('air_temp', 0.0)
-    humidity = data.get('humidity', 0.0)
-    water_temp = data.get('water_temp', 0.0)
-    water_level = data.get('water_level', 0.0)
-    ph = data.get('ph', 0.0)
-    tds = data.get('tds', 0.0)
-
-    query = "INSERT INTO sensor_data (air_temp, humidity, water_temp, water_level, ph, tds) VALUES (%s, %s, %s, %s, %s, %s)"
-    values = (air_temp, humidity, water_temp, water_level, ph, tds)
-
-    cursor.execute(query, values)
-    db.commit()
-
-    return jsonify({"message": "Data received and stored"}), 200
-
-
-# 📌 2. Fetch sensor data for the Android app (GraphActivity)
+# 📌 Fetch sensor data for Android app
 @app.route('/get_sensor_data', methods=['GET'])
 def get_sensor_data():
+    db = connect_db()
+    if not db:
+        return jsonify({"error": "Database connection failed"}), 500
+    
+    cursor = db.cursor(dictionary=True)
     cursor.execute("SELECT * FROM sensor_data ORDER BY id DESC LIMIT 50")
-    rows = cursor.fetchall()
+    data = cursor.fetchall()
+    cursor.close()
+    db.close()
+    
+    return jsonify(data)
 
-    sensor_list = []
-    for row in rows:
-        sensor_list.append({
-            "id": row[0],
-            "air_temp": row[1],
-            "humidity": row[2],
-            "water_temp": row[3],
-            "water_level": row[4],
-            "ph": row[5],
-            "tds": row[6],
-            "timestamp": row[7]
-        })
-
-    return jsonify(sensor_list)
-
-
-# 📌 3. Receive ON/OFF commands from Android and send to IoT via MQTT
+# 📌 Send ON/OFF Command to IoT System via MQTT
 @app.route('/send_command', methods=['POST'])
 def send_command():
     data = request.json
-    command = data.get('command', 'OFF')  # Default to OFF
+    command = data.get("command", "OFF")  # Default is OFF
 
     if command in ["ON", "OFF"]:
-        mqtt_client.publish(MQTT_TOPIC, command)
-        return jsonify({"message": f"Command '{command}' sent via MQTT"}), 200
-    else:
-        return jsonify({"error": "Invalid command"}), 400
+        mqtt_client.publish(MQTT_TOPIC_COMMAND, command)
+        print(f"📤 Sent MQTT Command: {command}")
+        return jsonify({"message": f"Command '{command}' sent!"}), 200
+    
+    return jsonify({"error": "Invalid command"}), 400
 
-
-# Run the Flask server
+# Start the Flask Web Server
 if __name__ == '__main__':
     from waitress import serve
     serve(app, host='0.0.0.0', port=5000)
-
