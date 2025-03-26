@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify
 import mysql.connector
 import paho.mqtt.client as mqtt
-import os  # Load environment variables
+import os
 import time
 from flask_cors import CORS
 
@@ -18,25 +18,35 @@ DB_CONFIG = {
 }
 
 # MQTT Configuration
-MQTT_BROKER = "broker.hivemq.com"  # Public MQTT broker
+MQTT_BROKER = "broker.hivemq.com"
 MQTT_PORT = 1883
 MQTT_TOPIC_SENSOR = "iot/sensor"
 MQTT_TOPIC_COMMAND = "iot/control"
 
 # Function to create a database connection
 def connect_db():
-    try:
-        return mysql.connector.connect(**DB_CONFIG)
-    except mysql.connector.Error as err:
-        print(f"🔴 Database Connection Error: {err}")
-        return None
+    while True:
+        try:
+            db = mysql.connector.connect(**DB_CONFIG, connection_timeout=10)
+            print("✅ Connected to MySQL")
+            return db
+        except mysql.connector.Error as err:
+            print(f"🔴 Database Connection Error: {err}")
+            print("Retrying in 5 seconds...")
+            time.sleep(5)
+
+# Establish Persistent Database Connection
+db = connect_db()
 
 # MQTT Client Setup
 mqtt_client = mqtt.Client()
 
 def on_connect(client, userdata, flags, rc):
-    print("✅ Connected to MQTT Broker")
-    client.subscribe(MQTT_TOPIC_SENSOR)
+    if rc == 0:
+        print("✅ Connected to MQTT Broker")
+        client.subscribe(MQTT_TOPIC_SENSOR)
+    else:
+        print(f"🔴 MQTT Connection Failed with Code {rc}")
 
 def on_message(client, userdata, msg):
     payload = msg.payload.decode().strip()
@@ -44,17 +54,20 @@ def on_message(client, userdata, msg):
 
     try:
         air_temp, humidity, water_temp, water_level, ph, tds = map(float, payload.split(","))
-        db = connect_db()
-        if db:
-            cursor = db.cursor()
-            query = "INSERT INTO sensor_data (air_temp, humidity, water_temp, water_level, ph, tds) VALUES (%s, %s, %s, %s, %s, %s)"
-            cursor.execute(query, (air_temp, humidity, water_temp, water_level, ph, tds))
-            db.commit()
-            cursor.close()
-            db.close()
-            print("✅ Data stored in database")
+
+        # Ensure MySQL Connection is Alive
+        global db
+        if not db.is_connected():
+            db = connect_db()
+
+        cursor = db.cursor()
+        query = "INSERT INTO sensor_data (air_temp, humidity, water_temp, water_level, ph, tds) VALUES (%s, %s, %s, %s, %s, %s)"
+        cursor.execute(query, (air_temp, humidity, water_temp, water_level, ph, tds))
+        db.commit()
+        cursor.close()
+        print("✅ Data stored in database")
     except Exception as e:
-        print(f"🔴 Error processing data: {e}")
+        print(f"🔴 Error processing MQTT data: {e}")
 
 # MQTT Client Initialization
 mqtt_client.on_connect = on_connect
@@ -67,23 +80,20 @@ mqtt_client.loop_start()
 # 📌 Fetch sensor data for Android app
 @app.route('/get_sensor_data', methods=['GET'])
 def get_sensor_data():
-    db = connect_db()
-    if not db:
-        return jsonify({"error": "Database connection failed"}), 500
-    
-    cursor = db.cursor(dictionary=True)
-    cursor.execute("SELECT * FROM sensor_data ORDER BY id DESC LIMIT 50")
-    data = cursor.fetchall()
-    cursor.close()
-    db.close()
-    
-    return jsonify(data)
+    try:
+        cursor = db.cursor(dictionary=True)
+        cursor.execute("SELECT * FROM sensor_data ORDER BY id DESC LIMIT 50")
+        data = cursor.fetchall()
+        cursor.close()
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": f"Failed to fetch data: {e}"}), 500
 
 # 📌 Send ON/OFF Command to IoT System via MQTT
 @app.route('/send_command', methods=['POST'])
 def send_command():
     data = request.json
-    command = data.get("command", "OFF")  # Default is OFF
+    command = data.get("command", "OFF")  
 
     if command in ["ON", "OFF"]:
         mqtt_client.publish(MQTT_TOPIC_COMMAND, command)
