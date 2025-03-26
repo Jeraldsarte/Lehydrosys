@@ -83,11 +83,13 @@ def get_sensor_data():
         return jsonify({"error": f"Failed to fetch data: {e}"}), 500
 
 
-# 📌 Send ON/OFF Command to IoT System via HTTP POST
-@app.route('/send_command', methods=['POST'])
+@app.route('/send_command', methods=['POST', 'GET'])  # Allow GET too
 def send_command():
+    if request.method == "GET":
+        return jsonify({"message": "No new command"}), 200  # Default response for GET
+
     data = request.json
-    command = data.get("command", "").lower()  # Convert to lowercase
+    command = data.get("command", "").lower()
 
     valid_commands = ["relay1_on", "relay1_off", "relay2_on", "relay2_off"]
 
@@ -96,6 +98,7 @@ def send_command():
         return jsonify({"message": f"Command '{command}' received!"}), 200
 
     return jsonify({"error": "Invalid command"}), 400
+
 
 
 # 📌 Health Check API
