@@ -79,7 +79,12 @@ def get_sensor_data():
 def send_command():
     try:
         data = request.json
-        command = data.get("command", "").lower()
+
+        # 🛑 Check if request body is empty
+        if not data or "command" not in data:
+            return jsonify({"error": "No command provided"}), 400
+
+        command = data["command"].lower()
 
         valid_commands = ["relay1_on", "relay1_off", "relay2_on", "relay2_off"]
         if command in valid_commands:
@@ -90,6 +95,7 @@ def send_command():
     except Exception as e:
         print(f"🔴 Error processing command: {e}")
         return jsonify({"error": "Failed to process command"}), 500
+
 
 # 📌 Health Check API
 @app.route('/health', methods=['GET'])
