@@ -1,8 +1,6 @@
 from flask import Flask, request, jsonify
 import mysql.connector
-import paho.mqtt.client as mqtt
 import os
-import time
 from flask_cors import CORS
 
 # Flask App Setup
@@ -17,114 +15,67 @@ DB_CONFIG = {
     "database": os.getenv("MYSQL_DATABASE"),
 }
 
-# MQTT Configuration
-MQTT_BROKER = "test.mosquitto.org"
-MQTT_PORT = 1883
-MQTT_TOPIC_SENSOR = "iot/sensor"
-MQTT_TOPIC_COMMAND = "iot/control"
-
-# Function to create a new database connection
+# Function to Create a New Database Connection
 def connect_db():
-    while True:
-        try:
-            db = mysql.connector.connect(**DB_CONFIG, connection_timeout=10)
-            print("✅ Connected to MySQL")
-            return db
-        except mysql.connector.Error as err:
-            print(f"🔴 Database Connection Error: {err}. Retrying in 5s...")
-            time.sleep(5)
-
-# MQTT Client Setup
-mqtt_client = mqtt.Client()
-
-def on_connect(client, userdata, flags, rc):
-    if rc == 0:
-        print("✅ Connected to MQTT Broker")
-        client.subscribe(MQTT_TOPIC_SENSOR)
-    else:
-        print(f"🔴 MQTT Connection Failed with Code {rc}")
-
-
-def on_message(client, userdata, msg):
-    payload = msg.payload.decode().strip()
-    print(f"📩 Received MQTT Data: {payload}")
-
     try:
-        air_temp, humidity, water_temp, water_level, ph, tds = map(float, payload.split(","))
+        db = mysql.connector.connect(**DB_CONFIG)
+        print("✅ Connected to MySQL")
+        return db
+    except mysql.connector.Error as err:
+        print(f"🔴 Database Connection Error: {err}")
+        return None
 
-        # Create a new MySQL connection for every request
+# 📌 HTTP POST Endpoint for Sensor Data
+@app.route('/sensor_data', methods=['POST'])
+def receive_sensor_data():
+    try:
+        data = request.json  # Receive JSON Data from ESP32
+        air_temp = data.get("air_temp")
+        humidity = data.get("humidity")
+        water_temp = data.get("water_temp")
+        water_level = data.get("water_level")
+        ph = data.get("ph")
+        tds = data.get("tds")
+
+        if None in [air_temp, humidity, water_temp, water_level, ph, tds]:
+            return jsonify({"error": "Missing data fields"}), 400
+
+        # Store Data in MySQL
         db = connect_db()
-        cursor = db.cursor()
-        query = "INSERT INTO sensor_data (air_temp, humidity, water_temp, water_level, ph, tds) VALUES (%s, %s, %s, %s, %s, %s)"
-        cursor.execute(query, (air_temp, humidity, water_temp, water_level, ph, tds))
-        db.commit()
-        cursor.close()
-        db.close()  # Close the connection after inserting data
-        print("✅ Data stored in database")
+        if db:
+            cursor = db.cursor()
+            query = "INSERT INTO sensor_data (air_temp, humidity, water_temp, water_level, ph, tds) VALUES (%s, %s, %s, %s, %s, %s)"
+            cursor.execute(query, (air_temp, humidity, water_temp, water_level, ph, tds))
+            db.commit()
+            cursor.close()
+            db.close()
+            print(f"✅ Data Stored: {data}")
+            return jsonify({"message": "Sensor data received and stored"}), 200
+        else:
+            return jsonify({"error": "Database connection failed"}), 500
+
     except Exception as e:
-        print(f"🔴 Error processing MQTT data: {e}")
+        print(f"🔴 Error: {e}")
+        return jsonify({"error": "Failed to process request"}), 500
 
-# Function to connect to MQTT broker with auto-reconnect
-def connect_mqtt():
-    while True:
-        try:
-            mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
-            print("✅ Connected to MQTT Broker")
-            return
-        except Exception as e:
-            print(f"🔴 MQTT Connection Failed: {e}. Retrying in 5s...")
-            time.sleep(5)
-
-mqtt_client.on_connect = on_connect
-mqtt_client.on_message = on_message
-connect_mqtt()
-mqtt_client.loop_start()  # Starts MQTT loop in background
-
-# ------------------ API ENDPOINTS ------------------
-
-# 📌 Fetch sensor data for Android app
+# 📌 HTTP GET Endpoint for Fetching Sensor Data
 @app.route('/get_sensor_data', methods=['GET'])
 def get_sensor_data():
     try:
-        db = connect_db()  # Create a new database connection
-        cursor = db.cursor(dictionary=True)
-        cursor.execute("SELECT * FROM sensor_data ORDER BY id DESC LIMIT 50")
-        data = cursor.fetchall()
-        cursor.close()
-        db.close()  # Close connection after use
-        return jsonify(data)
+        db = connect_db()
+        if db:
+            cursor = db.cursor(dictionary=True)
+            cursor.execute("SELECT * FROM sensor_data ORDER BY id DESC LIMIT 50")
+            data = cursor.fetchall()
+            cursor.close()
+            db.close()
+            return jsonify(data), 200
+        else:
+            return jsonify({"error": "Database connection failed"}), 500
     except Exception as e:
         return jsonify({"error": f"Failed to fetch data: {e}"}), 500
 
-# 📌 Send ON/OFF Command to IoT System via MQTT
-@app.route('/send_command', methods=['POST'])
-def send_command():
-    data = request.json
-    command = data.get("command", "").lower()  # Convert to lowercase
-
-    valid_commands = ["relay1_on", "relay2_on"]
-    
-    if command in valid_commands:
-        mqtt_client.publish(MQTT_TOPIC_COMMAND, command)
-        print(f"📤 Sent MQTT Command: {command}")
-        return jsonify({"message": f"Command '{command}' sent!"}), 200
-    
-    return jsonify({"error": "Invalid command"}), 400
-
-# 📌 Health Check API to Monitor Server Status
-@app.route('/health', methods=['GET'])
-def health_check():
-    try:
-        db = connect_db()
-        cursor = db.cursor()
-        cursor.execute("SELECT 1")  # Test MySQL connection
-        cursor.close()
-        db.close()
-        return jsonify({"status": "running", "database": "connected", "mqtt": "connected"}), 200
-    except Exception as e:
-        return jsonify({"status": "error", "database": "failed", "mqtt": "connected", "error": str(e)}), 500
-
-# Start the Flask Web Server
+# Start Flask Server
 if __name__ == '__main__':
     from waitress import serve
     serve(app, host='0.0.0.0', port=5000)
