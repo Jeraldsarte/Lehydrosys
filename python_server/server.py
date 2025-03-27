@@ -1,116 +1,88 @@
-from flask import Flask, request, jsonify
-import mysql.connector
-import os
-import time
-import threading
-from flask_cors import CORS
-from mysql.connector import pooling
+from fastapi import FastAPI, HTTPException
+import pymysql
+import requests
+import paho.mqtt.client as mqtt
 
-# Flask App Setup
-app = Flask(__name__)
-CORS(app)
+# FastAPI app
+app = FastAPI()
 
-# Load Database Configuration from Environment Variables
+# Database connection
 DB_CONFIG = {
-    "host": os.getenv("MYSQL_HOST"),
-    "user": os.getenv("MYSQL_USER"),
-    "password": os.getenv("MYSQL_PASSWORD"),
-    "database": os.getenv("MYSQL_DATABASE"),
+    "host": "your_database_host",
+    "user": "your_database_user",
+    "password": "your_database_password",
+    "database": "your_database_name",
 }
 
-# 🔹 Connection Pooling for Faster Queries
-db_pool = pooling.MySQLConnectionPool(pool_name="mypool", pool_size=5, **DB_CONFIG)
+# MQTT Broker for ESP32 communication
+MQTT_BROKER = "your_mqtt_broker_ip"
+MQTT_PORT = 1883
+MQTT_TOPIC = "esp32/relay"
 
-def get_db_connection():
-    return db_pool.get_connection()
+mqtt_client = mqtt.Client()
 
-# ------------------ API ENDPOINTS ------------------
+# 📌 Connect to MySQL Database
+def db_connect():
+    return pymysql.connect(**DB_CONFIG)
 
-# 📌 Receive Sensor Data (ESP32 sends data here)
-@app.route('/sensor_data', methods=['POST'])
-def receive_sensor_data():
+# 📥 **Receive Data from ESP32**
+@app.post("/upload_data")
+async def upload_data(air_temp: float, humidity: float, water_temp: float, water_level: float, ph: float, tds: float):
     try:
-        data = request.json  
-        if not data or any(value is None for value in data.values()):
-            return jsonify({"error": "Missing or invalid data fields"}), 400
-
-        # Run Database Insert in a Separate Thread (Non-Blocking)
-        threading.Thread(target=store_sensor_data, args=(data,)).start()
-
-        return jsonify({"message": "Sensor data received, storing in background"}), 200
-
+        conn = db_connect()
+        cursor = conn.cursor()
+        query = """
+        INSERT INTO sensor_readings (air_temp, humidity, water_temp, water_level, ph, tds)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        """
+        cursor.execute(query, (air_temp, humidity, water_temp, water_level, ph, tds))
+        conn.commit()
+        conn.close()
+        return {"message": "✅ Data saved successfully"}
     except Exception as e:
-        print(f"🔴 Error processing sensor data: {e}")
-        return jsonify({"error": "Failed to process request"}), 500
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
-# 🔹 Background Function to Store Data
-def store_sensor_data(data):
+# 📤 **Fetch Latest Sensor Data (for Android App)**
+@app.get("/latest_data")
+async def latest_data():
     try:
-        db = get_db_connection()
-        cursor = db.cursor()
-        query = """INSERT INTO sensor_data (air_temp, humidity, water_temp, water_level, ph, tds) 
-                   VALUES (%s, %s, %s, %s, %s, %s)"""
-        cursor.execute(query, (data["air_temp"], data["humidity"], data["water_temp"], 
-                               data["water_level"], data["ph"], data["tds"]))
-        db.commit()
-        cursor.close()
-        db.close()
-        print(f"✅ Data Stored: {data}")
+        conn = db_connect()
+        cursor = conn.cursor(pymysql.cursors.DictCursor)
+        cursor.execute("SELECT * FROM sensor_readings ORDER BY id DESC LIMIT 1")
+        data = cursor.fetchone()
+        conn.close()
+        if data:
+            return data
+        else:
+            raise HTTPException(status_code=404, detail="❌ No data found")
     except Exception as e:
-        print(f"🔴 Error inserting sensor data: {e}")
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
-# 📌 Fetch Sensor Data for Android App
-@app.route('/get_sensor_data', methods=['GET'])
-def get_sensor_data():
+# 📡 **Send ON/OFF Command to ESP32 (via HTTP)**
+@app.get("/control_relay")
+async def control_relay(state: str):
+    if state not in ["on", "off"]:
+        raise HTTPException(status_code=400, detail="Invalid state. Use 'on' or 'off'.")
+
+    esp32_url = f"http://your_esp32_ip/control?relay={state}"
     try:
-        db = get_db_connection()
-        cursor = db.cursor(dictionary=True)
-        cursor.execute("SELECT * FROM sensor_data ORDER BY id DESC LIMIT 50")
-        data = cursor.fetchall()
-        cursor.close()
-        db.close()
-        return jsonify(data), 200
+        response = requests.get(esp32_url)
+        return {"message": f"✅ Relay turned {state}", "response": response.text}
     except Exception as e:
-        print(f"🔴 Failed to fetch data: {e}")
-        return jsonify({"error": "Failed to fetch data"}), 500
+        raise HTTPException(status_code=500, detail=f"Error sending command to ESP32: {str(e)}")
 
-# 📌 Send ON/OFF Command to IoT System via HTTP POST
-@app.route('/send_command', methods=['POST'])
-def send_command():
+# 📡 **Send ON/OFF Command to ESP32 (via MQTT)**
+@app.get("/mqtt_control")
+async def mqtt_control(state: str):
+    if state not in ["on", "off"]:
+        raise HTTPException(status_code=400, detail="Invalid state. Use 'on' or 'off'.")
+
     try:
-        data = request.json
-
-        # 🛑 Check if request body is empty
-        if not data or "command" not in data:
-            return jsonify({"error": "No command provided"}), 400
-
-        command = data["command"].lower()
-
-        valid_commands = ["relay1_on", "relay1_off", "relay2_on", "relay2_off"]
-        if command in valid_commands:
-            print(f"📤 Received Command: {command}")
-            return jsonify({"message": f"Command '{command}' received!"}), 200
-        return jsonify({"error": "Invalid command"}), 400
-
+        mqtt_client.connect(MQTT_BROKER, MQTT_PORT, 60)
+        mqtt_client.publish(MQTT_TOPIC, state)
+        mqtt_client.disconnect()
+        return {"message": f"✅ MQTT Command Sent: {state}"}
     except Exception as e:
-        print(f"🔴 Error processing command: {e}")
-        return jsonify({"error": "Failed to process command"}), 500
+        raise HTTPException(status_code=500, detail=f"Error sending MQTT command: {str(e)}")
 
-
-# 📌 Health Check API
-@app.route('/health', methods=['GET'])
-def health_check():
-    try:
-        db = get_db_connection()
-        cursor = db.cursor()
-        cursor.execute("SELECT 1")  # Test MySQL connection
-        cursor.close()
-        db.close()
-        return jsonify({"status": "running", "database": "connected"}), 200
-    except Exception as e:
-        return jsonify({"status": "error", "database": "failed", "error": str(e)}), 500
-
-# Start the Flask Web Server
-if __name__ == '__main__':
-    from waitress import serve
-    serve(app, host='0.0.0.0', port=5000)
+# Run FastAPI server: `uvicorn server:app --host 0.0.0.0 --port 8000`
