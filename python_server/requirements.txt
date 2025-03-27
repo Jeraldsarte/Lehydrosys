@@ -1,5 +1,5 @@
-Flask
-gunicorn
-mysql-connector-python
-flask-cors
+fastapi
+uvicorn
+pymysql
 paho-mqtt
+requests
