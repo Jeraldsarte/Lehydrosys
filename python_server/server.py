@@ -2,22 +2,22 @@ from fastapi import FastAPI, HTTPException
 import pymysql
 import requests
 import paho.mqtt.client as mqtt
+import os
 
 # FastAPI app
 app = FastAPI()
 
-# Database connection
+# Load environment variables
 DB_CONFIG = {
-    "host": "your_database_host",
-    "user": "your_database_user",
-    "password": "your_database_password",
-    "database": "your_database_name",
+    "host": os.getenv("DB_HOST"),
+    "user": os.getenv("DB_USER"),
+    "password": os.getenv("DB_PASS"),
+    "database": os.getenv("DB_NAME"),
 }
 
-# MQTT Broker for ESP32 communication
-MQTT_BROKER = "your_mqtt_broker_ip"
-MQTT_PORT = 1883
-MQTT_TOPIC = "esp32/relay"
+MQTT_BROKER = os.getenv("MQTT_BROKER")
+MQTT_PORT = int(os.getenv("MQTT_PORT", 1883))
+MQTT_TOPIC = os.getenv("MQTT_TOPIC", "esp32/relay")
 
 mqtt_client = mqtt.Client()
 
@@ -64,7 +64,7 @@ async def control_relay(state: str):
     if state not in ["on", "off"]:
         raise HTTPException(status_code=400, detail="Invalid state. Use 'on' or 'off'.")
 
-    esp32_url = f"http://your_esp32_ip/control?relay={state}"
+    esp32_url = f"http://{os.getenv('ESP32_IP')}/control?relay={state}"
     try:
         response = requests.get(esp32_url)
         return {"message": f"✅ Relay turned {state}", "response": response.text}
