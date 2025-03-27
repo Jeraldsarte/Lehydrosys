@@ -1,5 +1,6 @@
 fastapi
 uvicorn
 pymysql
-paho-mqtt
 requests
+paho-mqtt
+python-dotenv
